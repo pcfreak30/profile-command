@@ -46,6 +46,7 @@ class Profiler {
 	private $tick_query_offset      = null;
 	private $tick_cache_hit_offset  = null;
 	private $tick_cache_miss_offset = null;
+	private $is_php7 = false;
 
 	public function __construct( $type, $focus ) {
 		$this->type  = $type;
@@ -96,6 +97,9 @@ class Profiler {
 				}
 			}
 		);
+
+		$this->is_php7 = version_compare( PHP_VERSION, '7.0.0' ) >= 0;
+
 		if ( 'hook' === $this->type
 			&& ':before' === substr( $this->focus, -7, 7 ) ) {
 			$stage_hooks = array();
@@ -128,10 +132,6 @@ class Profiler {
 	 */
 	public function wp_tick_profile_begin( $value = null ) {
 
-		if ( version_compare( PHP_VERSION, '7.0.0' ) >= 0 ) {
-			WP_CLI::error( 'Profiling intermediate hooks is broken in PHP 7, see https://bugs.php.net/bug.php?id=72966' );
-		}
-
 		// Disable opcode optimizers.  These "optimize" calls out of the stack
 		// and hide calls from the tick handler and backtraces.
 		// Copied from P3 Profiler
@@ -149,8 +149,13 @@ class Profiler {
 			@ini_set( 'zend_optimizerplus.optimization_level', 0 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- ini_set can be disabled on server.
 		}
 
-		register_tick_function( array( $this, 'handle_function_tick' ) );
-		declare( ticks = 1 );
+		declare( ticks=1 );
+
+		if ( $this->is_php7 ) {
+			register_tick_function( array( $this, 'handle_function_tick' ) );
+			FileStreamWrapper::init();
+		}
+
 		return $value;
 	}
 
@@ -159,6 +164,7 @@ class Profiler {
 	 */
 	public function wp_tick_profile_end( $value = null ) {
 		unregister_tick_function( array( $this, 'handle_function_tick' ) );
+		FileStreamWrapper::restore();
 		$this->tick_callback = null;
 		return $value;
 	}
@@ -331,7 +337,8 @@ class Profiler {
 
 		$callback = $location = '';
 		if ( in_array( strtolower( $frame['function'] ), array( 'include', 'require', 'include_once', 'require_once' ) ) ) {
-			$callback = $frame['function'] . " '" . $frame['args'][0] . "'";
+			$ext = pathinfo( $frame['args'][0] , PATHINFO_EXTENSION);
+			$callback = $frame['function'] . " '" . str_replace( "_profile.{$ext}"  ,  ".{$ext}", $frame['args'][0]) . "'";
 		} elseif ( isset( $frame['object'] ) && method_exists( $frame['object'], $frame['function'] ) ) {
 			$callback = get_class( $frame['object'] ) . '->' . $frame['function'] . '()';
 		} elseif ( isset( $frame['class'] ) && method_exists( $frame['class'], $frame['function'] ) ) {
@@ -348,7 +355,8 @@ class Profiler {
 		}
 
 		if ( isset( $frame['file'] ) ) {
-			$location = $frame['file'];
+			$ext      = pathinfo( $frame['file'], PATHINFO_EXTENSION );
+			$location = str_replace( "_profile.{$ext}", ".{$ext}", $frame['args'][0] );
 			if ( isset( $frame['line'] ) ) {
 				$location .= ':' . $frame['line'];
 			}
